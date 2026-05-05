@@ -12,6 +12,10 @@ use ruff_text_size::{Ranged, TextRange, TextSize};
 
 use crate::Db;
 
+const PARENTHESES: (TokenKind, TokenKind) = (TokenKind::Lpar, TokenKind::Rpar);
+const BRACKETS: (TokenKind, TokenKind) = (TokenKind::Lsqb, TokenKind::Rsqb);
+const BRACES: (TokenKind, TokenKind) = (TokenKind::Lbrace, TokenKind::Rbrace);
+
 /// The kind of a folding range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FoldingRangeKind {
@@ -130,7 +134,7 @@ impl<'a> FoldingRangeVisitor<'a> {
         true
     }
 
-    /// Add the given expression folding range unless it's already covered by a block header fold.
+    /// Add a folding range for a multi-line expression.
     fn add_expression_range(&mut self, range: TextRange) {
         if self
             .active_block_header_delimiter_ranges
@@ -141,6 +145,17 @@ impl<'a> FoldingRangeVisitor<'a> {
         }
 
         self.add_range(range);
+    }
+
+    /// Add a folding range for a multi-line expression inside delimiters.
+    fn add_delimited_expression_range(
+        &mut self,
+        range: TextRange,
+        delimiters: (TokenKind, TokenKind),
+    ) {
+        if let Some(range) = self.delimited_range(range, delimiters) {
+            self.add_expression_range(range);
+        }
     }
 
     fn is_multiline(&self, range: TextRange) -> bool {
@@ -361,6 +376,28 @@ impl<'a> FoldingRangeVisitor<'a> {
         }
     }
 
+    /// Returns the range inside the given opening and closing tokens, if they are present.
+    fn delimited_range(
+        &self,
+        range: TextRange,
+        (opening, closing): (TokenKind, TokenKind),
+    ) -> Option<TextRange> {
+        let mut tokens = self
+            .tokens
+            .in_range(range)
+            .iter()
+            .filter(|token| !token.kind().is_trivia());
+
+        let opening_token = tokens.next()?;
+        let closing_token = tokens.next_back()?;
+
+        if opening_token.kind() == opening && closing_token.kind() == closing {
+            Some(TextRange::new(opening_token.end(), closing_token.start()))
+        } else {
+            None
+        }
+    }
+
     /// Adds folding ranges for the header and body of the given block.
     fn add_block_ranges<T: Ranged>(&mut self, node: AnyNodeRef<'a>, block: &[T]) {
         let Some(first_block_statement) = block.first() else {
@@ -536,55 +573,59 @@ impl<'a> SourceOrderVisitor<'a> for FoldingRangeVisitor<'a> {
             }
 
             // Multiline expressions
-            AnyNodeRef::ExprList(list) => {
-                self.add_expression_range(list.range());
+            AnyNodeRef::ExprList(_) | AnyNodeRef::ExprListComp(_) | AnyNodeRef::TypeParams(_) => {
+                self.add_delimited_expression_range(node.range(), BRACKETS);
             }
             AnyNodeRef::ExprTuple(tuple)
                 // Only fold parenthesized tuples.
                 if tuple.parenthesized => {
-                    self.add_expression_range(tuple.range());
+                    self.add_delimited_expression_range(node.range(), PARENTHESES);
                 }
-            AnyNodeRef::ExprDict(dict) => {
-                self.add_expression_range(dict.range());
-            }
-            AnyNodeRef::ExprSet(set) => {
-                self.add_expression_range(set.range());
-            }
-            AnyNodeRef::ExprListComp(listcomp) => {
-                self.add_expression_range(listcomp.range());
-            }
-            AnyNodeRef::ExprSetComp(setcomp) => {
-                self.add_expression_range(setcomp.range());
-            }
-            AnyNodeRef::ExprDictComp(dictcomp) => {
-                self.add_expression_range(dictcomp.range());
+            AnyNodeRef::ExprDict(_)
+            | AnyNodeRef::ExprSet(_)
+            | AnyNodeRef::ExprSetComp(_)
+            | AnyNodeRef::ExprDictComp(_) => {
+                self.add_delimited_expression_range(node.range(), BRACES);
             }
             AnyNodeRef::ExprGenerator(generator) => {
-                self.add_expression_range(generator.range());
+                if generator.parenthesized {
+                    self.add_delimited_expression_range(node.range(), PARENTHESES);
+                } else {
+                    self.add_expression_range(node.range());
+                }
+            }
+            AnyNodeRef::ExprSubscript(subscript) => {
+                let search_range = TextRange::new(subscript.value.end(), node.end());
+                if let Some(opening) = self.find_token_start(TokenKind::Lsqb, search_range) {
+                    let subscript_range = TextRange::new(opening, node.end());
+                    self.add_delimited_expression_range(subscript_range, BRACKETS);
+                }
             }
 
             // Function calls with arguments spanning multiple lines
             AnyNodeRef::ExprCall(call) => {
-                self.add_expression_range(call.range());
+                let arguments_range = call.arguments.range();
+                if let Some(arguments_inner_range) =
+                    self.delimited_range(arguments_range, PARENTHESES)
+                {
+                    if self.is_multiline(arguments_range) {
+                        let callee_range = TextRange::new(node.start(), arguments_range.start());
+                        if self.is_multiline(callee_range) {
+                            self.add_expression_range(node.range());
+                        }
+                        self.add_expression_range(arguments_inner_range);
+                    } else {
+                        self.add_expression_range(node.range());
+                    }
+                }
             }
 
             // String and bytes literals
-            AnyNodeRef::ExprStringLiteral(string) => {
-                self.add_expression_range(string.range());
-            }
-            AnyNodeRef::ExprBytesLiteral(bytes) => {
-                self.add_expression_range(bytes.range());
-            }
-            AnyNodeRef::ExprFString(fstring) => {
-                self.add_expression_range(fstring.range());
-            }
-            AnyNodeRef::ExprTString(tstring) => {
-                self.add_expression_range(tstring.range());
-            }
-
-            // Type parameter lists
-            AnyNodeRef::TypeParams(params) => {
-                self.add_expression_range(params.range());
+            AnyNodeRef::ExprStringLiteral(_)
+            | AnyNodeRef::ExprBytesLiteral(_)
+            | AnyNodeRef::ExprFString(_)
+            | AnyNodeRef::ExprTString(_) => {
+                self.add_expression_range(node.range());
             }
 
             _ => {}
