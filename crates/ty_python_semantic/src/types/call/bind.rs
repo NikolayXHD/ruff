@@ -4358,6 +4358,37 @@ impl<'a, 'db> ArgumentMatcher<'a, 'db> {
                     name.as_str(),
                 );
             }
+
+            let fallback_value_type = argument_type
+                .and_then(|ty| unpacked_typed_dict_fallback_value_type(db, ty))
+                .filter(|ty| !ty.is_dynamic());
+
+            if let Some(fallback_value_type) = fallback_value_type {
+                for (parameter_index, parameter) in self.parameters.iter().enumerate() {
+                    if self.parameter_info[parameter_index].matched
+                        && !parameter.is_keyword_variadic()
+                    {
+                        continue;
+                    }
+
+                    if matches!(
+                        parameter.kind(),
+                        ParameterKind::PositionalOnly { .. } | ParameterKind::Variadic { .. }
+                    ) {
+                        continue;
+                    }
+
+                    self.assign_argument(
+                        argument_index,
+                        Argument::Keywords,
+                        Some(fallback_value_type),
+                        parameter_index,
+                        parameter,
+                        false,
+                        true,
+                    );
+                }
+            }
         } else {
             for (parameter_index, parameter) in self.parameters.iter().enumerate() {
                 if self.parameter_info[parameter_index].matched && !parameter.is_keyword_variadic()
@@ -4510,6 +4541,32 @@ fn validate_keyword_unpack_key_type<'db>(
         KeywordUnpackKeyTypeCheck::Valid
     } else {
         KeywordUnpackKeyTypeCheck::Invalid(key_type)
+    }
+}
+
+/// Return the original mapping value type from a synthetic `dict & TypedDict` splat.
+fn unpacked_typed_dict_fallback_value_type<'db>(
+    db: &'db dyn Db,
+    argument_type: Type<'db>,
+) -> Option<Type<'db>> {
+    let mut value_tys = Vec::new();
+
+    let Type::Intersection(intersection) = argument_type else {
+        return None;
+    };
+
+    for &element in intersection.positive(db) {
+        if !matches!(element, Type::TypedDict(_))
+            && let Some((_, value_ty)) = element.unpack_keys_and_items(db)
+        {
+            value_tys.push(value_ty);
+        }
+    }
+
+    match value_tys.as_slice() {
+        [] => None,
+        [value_ty] => Some(*value_ty),
+        _ => Some(IntersectionType::from_elements(db, value_tys)),
     }
 }
 
@@ -5227,6 +5284,7 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
             let keyword_variadic = matched_parameters.iter().copied().find(|parameter_index| {
                 self.signature.parameters()[*parameter_index].is_keyword_variadic()
             });
+            let mut checked_explicit_parameters = FxHashSet::default();
 
             for (name, unpacked_key) in &unpacked_keys {
                 let parameter_index = matched_parameters
@@ -5242,6 +5300,10 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
                     continue;
                 };
 
+                if !self.signature.parameters()[parameter_index].is_keyword_variadic() {
+                    checked_explicit_parameters.insert(parameter_index);
+                }
+
                 self.check_argument_type(
                     constraints,
                     argument_index,
@@ -5250,6 +5312,30 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
                     unpacked_key.value_ty,
                     parameter_index,
                 );
+            }
+
+            let fallback_value_type =
+                unpacked_typed_dict_fallback_value_type(self.db, argument_type)
+                    .filter(|ty| !ty.is_dynamic());
+
+            if let Some(fallback_value_type) = fallback_value_type {
+                for parameter_index in matched_parameters.iter().copied() {
+                    let parameter = &self.signature.parameters()[parameter_index];
+                    if !parameter.is_keyword_variadic()
+                        && checked_explicit_parameters.contains(&parameter_index)
+                    {
+                        continue;
+                    }
+
+                    self.check_argument_type(
+                        constraints,
+                        argument_index,
+                        adjusted_argument_index,
+                        argument,
+                        fallback_value_type,
+                        parameter_index,
+                    );
+                }
             }
 
             return;
