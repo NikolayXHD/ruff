@@ -345,6 +345,20 @@ fn file_to_module_impl<'db, 'a>(
         if file.path(db) == module_file.path(db) {
             return Some(module);
         }
+    } else if file.source_type(db) == PySourceType::Ipynb
+        && module_file.source_type(db) == PySourceType::Python
+    {
+        // For notebooks, the .py file (jupytext sync) may be returned instead of the .ipynb file.
+        // If both files have the same stem and parent, they represent the same module.
+        let same_path = match (file.path(db), module_file.path(db)) {
+            (FilePath::System(a), FilePath::System(b)) => {
+                a.parent() == b.parent() && a.file_stem() == b.file_stem()
+            }
+            _ => false,
+        };
+        if same_path {
+            return Some(module);
+        }
     }
     // This path is for a module with the same name but with a different precedence. For example:
     // ```
@@ -1440,11 +1454,10 @@ fn resolve_name_in_search_path(
 
 type ResolvedNames = Vec<ModuleResolutionCandidate>;
 
-/// If `module` exists on disk with either a `.pyi` or `.py` extension,
+/// If `module` exists on disk with either a `.pyi`, `.py`, or `.ipynb` extension,
 /// return the [`File`] corresponding to that path.
 ///
-/// `.pyi` files take priority, as they always have priority when
-/// resolving modules.
+/// `.pyi` files take priority, then `.py`, then `.ipynb`.
 pub(super) fn resolve_file_module(
     module: &ModulePath,
     resolver_state: &ResolverContext,
@@ -1455,11 +1468,17 @@ pub(super) fn resolve_file_module(
     } else {
         None
     };
-    let file = stub_file.or_else(|| {
-        module
-            .with_py_extension()
-            .and_then(|path| path.to_file(resolver_state))
-    })?;
+    let file = stub_file
+        .or_else(|| {
+            module
+                .with_py_extension()
+                .and_then(|path| path.to_file(resolver_state))
+        })
+        .or_else(|| {
+            module
+                .with_ipynb_extension()
+                .and_then(|path| path.to_file(resolver_state))
+        })?;
 
     // For system files, test if the path has the correct casing.
     // We can skip this step for vendored files or virtual files because

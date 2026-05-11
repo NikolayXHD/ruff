@@ -386,7 +386,7 @@ impl From<ruff_db::system::FileType> for FileType {
 /// Returns true if and only if the given file extension corresponds
 /// to a Python source or stub file.
 fn is_python_extension(ext: &str) -> bool {
-    matches!(ext, "py" | "pyi")
+    matches!(ext, "py" | "pyi" | "ipynb")
 }
 
 #[cfg(test)]

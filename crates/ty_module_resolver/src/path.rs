@@ -69,8 +69,8 @@ impl ModulePath {
                 );
             } else {
                 assert!(
-                    matches!(component_extension, "pyi" | "py"),
-                    "Extension must be `py` or `pyi`; got `{component_extension}`"
+                    matches!(component_extension, "pyi" | "py" | "ipynb"),
+                    "Extension must be `py`, `pyi`, or `ipynb`; got `{component_extension}`"
                 );
             }
         }
@@ -326,6 +326,22 @@ impl ModulePath {
         })
     }
 
+    /// Returns a [`ModulePath`] with a `.ipynb` extension.
+    #[must_use]
+    pub(crate) fn with_ipynb_extension(&self) -> Option<Self> {
+        if self.is_standard_library() {
+            return None;
+        }
+        let ModulePath {
+            search_path,
+            relative_path,
+        } = self;
+        Some(ModulePath {
+            search_path: search_path.clone(),
+            relative_path: relative_path.with_extension("ipynb"),
+        })
+    }
+
     pub(crate) fn into_search_path(self) -> SearchPath {
         self.search_path
     }
@@ -573,7 +589,7 @@ impl SearchPath {
         if self.is_standard_library() {
             extension == "pyi"
         } else {
-            matches!(extension, "pyi" | "py")
+            matches!(extension, "pyi" | "py" | "ipynb")
         }
     }
 
