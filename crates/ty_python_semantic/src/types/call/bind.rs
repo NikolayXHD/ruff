@@ -4358,37 +4358,6 @@ impl<'a, 'db> ArgumentMatcher<'a, 'db> {
                     name.as_str(),
                 );
             }
-
-            let fallback_value_type = argument_type
-                .and_then(|ty| unpacked_typed_dict_fallback_value_type(db, ty))
-                .filter(|ty| !ty.is_dynamic());
-
-            if let Some(fallback_value_type) = fallback_value_type {
-                for (parameter_index, parameter) in self.parameters.iter().enumerate() {
-                    if self.parameter_info[parameter_index].matched
-                        && !parameter.is_keyword_variadic()
-                    {
-                        continue;
-                    }
-
-                    if matches!(
-                        parameter.kind(),
-                        ParameterKind::PositionalOnly { .. } | ParameterKind::Variadic { .. }
-                    ) {
-                        continue;
-                    }
-
-                    self.assign_argument(
-                        argument_index,
-                        Argument::Keywords,
-                        Some(fallback_value_type),
-                        parameter_index,
-                        parameter,
-                        false,
-                        true,
-                    );
-                }
-            }
         } else {
             for (parameter_index, parameter) in self.parameters.iter().enumerate() {
                 if self.parameter_info[parameter_index].matched && !parameter.is_keyword_variadic()
@@ -5284,7 +5253,6 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
             let keyword_variadic = matched_parameters.iter().copied().find(|parameter_index| {
                 self.signature.parameters()[*parameter_index].is_keyword_variadic()
             });
-            let mut checked_explicit_parameters = FxHashSet::default();
 
             for (name, unpacked_key) in &unpacked_keys {
                 let parameter_index = matched_parameters
@@ -5299,10 +5267,6 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
                 let Some(parameter_index) = parameter_index else {
                     continue;
                 };
-
-                if !self.signature.parameters()[parameter_index].is_keyword_variadic() {
-                    checked_explicit_parameters.insert(parameter_index);
-                }
 
                 self.check_argument_type(
                     constraints,
@@ -5321,8 +5285,9 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
             if let Some(fallback_value_type) = fallback_value_type {
                 for parameter_index in matched_parameters.iter().copied() {
                     let parameter = &self.signature.parameters()[parameter_index];
-                    if !parameter.is_keyword_variadic()
-                        && checked_explicit_parameters.contains(&parameter_index)
+                    if parameter
+                        .keyword_name()
+                        .is_some_and(|name| unpacked_keys.contains_key(name))
                     {
                         continue;
                     }
